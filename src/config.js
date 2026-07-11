@@ -2,59 +2,96 @@ const fs = require('fs');
 const path = require('path');
 
 function parseYaml(text) {
-  const lines = text.split('\n');
-  const result = {};
-  const stack = [{ obj: result, indent: -1 }];
-
-  for (const raw of lines) {
-    const line = raw.replace(/\t/g, '  ');
-    if (line.trim() === '' || line.trim().startsWith('#')) continue;
-
-    const indent = line.search(/\S/);
-    const content = line.trim();
-
-    const colonIdx = content.indexOf(':');
-    if (colonIdx === -1) continue;
-
-    const key = content.slice(0, colonIdx).trim();
-    let val = content.slice(colonIdx + 1).trim();
-
-    while (stack.length > 1 && indent <= stack[stack.length - 1].indent) {
-      stack.pop();
-    }
-
-    const parent = stack[stack.length - 1].obj;
-
-    if (val === '') {
-      const newObj = Array.isArray(parent) ? {} : {};
-      if (Array.isArray(parent)) {
-        parent.push(newObj);
-      } else if (key.startsWith('- ')) {
-        if (!Array.isArray(parent)) {
-          const arrKey = key.slice(2);
-          const arr = [];
-          parent[arrKey] = arr;
-          stack.push({ obj: arr, indent });
-          continue;
-        }
-      } else {
-        parent[key] = newObj;
-      }
-      stack.push({ obj: newObj, indent });
-    } else if (key.startsWith('- ')) {
-      // List item with value
-      if (!Array.isArray(parent)) {
-        // Should not happen in well-formed YAML
-        parent[key.slice(2)] = parseScalar(val);
-      } else {
-        parent.push(parseScalar(val));
-      }
-    } else {
-      parent[key] = parseScalar(val);
-    }
+  const rawLines = text.split('\n').map(l => l.replace(/\t/g, '  '));
+  const lines = [];
+  for (const l of rawLines) {
+    const trimmed = l.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    lines.push(l);
   }
 
-  return result;
+  let pos = 0;
+
+  function peekIndent() {
+    if (pos >= lines.length) return -1;
+    const m = lines[pos].match(/^(\s*)/);
+    return m ? m[1].length : 0;
+  }
+
+  function parseMapping(indent) {
+    const obj = {};
+    while (pos < lines.length) {
+      const lineIndent = peekIndent();
+      if (lineIndent < indent) break;
+      if (lineIndent > indent) break;
+
+      const line = lines[pos++];
+      const content = line.trim();
+      const colonIdx = content.indexOf(':');
+      if (colonIdx === -1) continue;
+
+      const key = content.slice(0, colonIdx).trim();
+      const val = content.slice(colonIdx + 1).trim();
+
+      if (val === '') {
+        obj[key] = parseValue();
+      } else {
+        obj[key] = parseScalar(val);
+      }
+    }
+    return obj;
+  }
+
+  function parseArray(indent) {
+    const arr = [];
+    while (pos < lines.length && peekIndent() >= indent) {
+      const lineIndent = peekIndent();
+      if (lineIndent !== indent) break;
+
+      const line = lines[pos++];
+      const content = line.trim();
+      if (!content.startsWith('- ')) break;
+
+      const rest = content.slice(2).trim();
+      const colonIdx = rest.indexOf(':');
+      if (colonIdx !== -1) {
+        const key = rest.slice(0, colonIdx).trim();
+        const val = rest.slice(colonIdx + 1).trim();
+        const item = {};
+
+        if (val !== '') {
+          item[key] = parseScalar(val);
+        }
+
+        const subIndent = peekIndent();
+        if (subIndent > lineIndent) {
+          const subObj = parseMapping(subIndent);
+          Object.assign(item, subObj);
+        }
+        arr.push(item);
+      } else {
+        arr.push(parseScalar(rest));
+      }
+    }
+    return arr;
+  }
+
+  function parseValue() {
+    if (pos >= lines.length) return null;
+    const indent = peekIndent();
+    if (indent < 0) return null;
+
+    const content = lines[pos].trim();
+    if (content.startsWith('- ')) {
+      return parseArray(indent);
+    }
+    if (content.includes(':')) {
+      return parseMapping(indent);
+    }
+    return null;
+  }
+
+  return parseMapping(0);
 }
 
 function parseScalar(val) {
