@@ -2,7 +2,7 @@ const vscode = require('vscode');
 const { ChatViewProvider } = require('./chatProvider');
 
 function activate(context) {
-  const chatProvider = new ChatViewProvider(context.extensionUri);
+  const chatProvider = new ChatViewProvider(context);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(

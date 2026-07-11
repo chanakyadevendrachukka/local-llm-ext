@@ -2,31 +2,138 @@ const vscode = require('vscode');
 const { loadConfig, getConfigYamlTemplate } = require('./config');
 const { createChatCompletion, testConnection } = require('./llmClient');
 
+
+const STORAGE_KEY = 'local-llm-chat.conversations';
+
 class ChatViewProvider {
   static viewType = 'local-llm-chat.chatView';
 
-  constructor(extensionUri) {
-    this._extensionUri = extensionUri;
+  constructor(context) {
+    this._context = context;
     this._view = undefined;
     this._models = [];
-    this._messages = [];
     this._abortController = undefined;
     this._selectedModelIndex = 0;
+
+    this._conversations = [];
+    this._currentId = null;
+    this._loadConversations();
   }
+
+  // ── Conversation Persistence ─────────────────────────────
+
+  _loadConversations() {
+    const stored = this._context.globalState.get(STORAGE_KEY, []);
+    this._conversations = stored;
+    if (this._conversations.length === 0) {
+      this._newConversation();
+    } else {
+      this._currentId = this._conversations[0].id;
+    }
+  }
+
+  async _saveConversations() {
+    await this._context.globalState.update(STORAGE_KEY, this._conversations);
+  }
+
+  _getConversationList() {
+    return this._conversations.map((c) => ({
+      id: c.id,
+      title: c.title,
+      timestamp: c.timestamp,
+      messageCount: c.messages.length,
+    }));
+  }
+
+  _getCurrentConversation() {
+    return this._conversations.find((c) => c.id === this._currentId);
+  }
+
+  _newConversation() {
+    const conv = {
+      id: Date.now().toString(),
+      title: 'New Chat',
+      timestamp: Date.now(),
+      messages: [],
+      modelIndex: this._selectedModelIndex,
+    };
+    this._conversations.unshift(conv);
+    this._currentId = conv.id;
+    this._saveConversations();
+    return conv;
+  }
+
+  _switchConversation(id) {
+    const conv = this._conversations.find((c) => c.id === id);
+    if (!conv) return;
+
+    // Save current conversation's messages
+    const current = this._getCurrentConversation();
+    if (current) {
+      current.modelIndex = this._selectedModelIndex;
+    }
+
+    this._currentId = id;
+    this._selectedModelIndex = conv.modelIndex || 0;
+    this._postMessage({
+      type: 'loadConversation',
+      messages: conv.messages,
+      modelIndex: this._selectedModelIndex,
+    });
+  }
+
+  _deleteConversation(id) {
+    this._conversations = this._conversations.filter((c) => c.id !== id);
+    if (this._conversations.length === 0) {
+      this._newConversation();
+    } else if (this._currentId === id) {
+      this._currentId = this._conversations[0].id;
+      const conv = this._conversations[0];
+      this._selectedModelIndex = conv.modelIndex || 0;
+      this._postMessage({
+        type: 'loadConversation',
+        messages: conv.messages,
+        modelIndex: this._selectedModelIndex,
+      });
+    }
+    this._saveConversations();
+    this._postMessage({
+      type: 'setConversations',
+      conversations: this._getConversationList(),
+      currentId: this._currentId,
+    });
+  }
+
+  _updateCurrentTitle(title) {
+    const conv = this._getCurrentConversation();
+    if (conv && conv.title === 'New Chat' && title) {
+      conv.title = title.length > 60 ? title.slice(0, 60) + '...' : title;
+      this._saveConversations();
+      this._postMessage({
+        type: 'setConversations',
+        conversations: this._getConversationList(),
+        currentId: this._currentId,
+      });
+    }
+  }
+
+  // ── WebView Lifecycle ────────────────────────────────────
 
   resolveWebviewView(webviewView, _context, _token) {
     this._view = webviewView;
 
-    webviewView.webview.options = {
-      enableScripts: true,
-    };
-
+    webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this._getHtml();
 
     webviewView.webview.onDidReceiveMessage(async (data) => {
       switch (data.type) {
         case 'ready':
           this._loadModels();
+          this._postMessage({
+            type: 'setConversations',
+            conversations: this._getConversationList(),
+            currentId: this._currentId,
+          });
           break;
         case 'sendMessage':
           await this._handleSendMessage(data.text);
@@ -35,8 +142,19 @@ class ChatViewProvider {
           this._selectedModelIndex = data.index;
           break;
         case 'newChat':
-          this._messages = [];
+          this._newConversation();
           this._postMessage({ type: 'clearMessages' });
+          this._postMessage({
+            type: 'setConversations',
+            conversations: this._getConversationList(),
+            currentId: this._currentId,
+          });
+          break;
+        case 'switchConversation':
+          this._switchConversation(data.id);
+          break;
+        case 'deleteConversation':
+          this._deleteConversation(data.id);
           break;
         case 'stopGeneration':
           if (this._abortController) {
@@ -52,6 +170,8 @@ class ChatViewProvider {
       }
     });
   }
+
+  // ── Model Loading ────────────────────────────────────────
 
   _loadModels() {
     const workspaceRoot = vscode.workspace.workspaceFolders
@@ -71,8 +191,16 @@ class ChatViewProvider {
     });
   }
 
+  // ── Send Message ─────────────────────────────────────────
+
   async _handleSendMessage(text) {
     if (!text.trim()) return;
+
+    // Auto-title from first message
+    const current = this._getCurrentConversation();
+    if (current && current.messages.length === 0) {
+      this._updateCurrentTitle(text);
+    }
 
     const model = this._models[this._selectedModelIndex];
     if (!model) {
@@ -82,17 +210,24 @@ class ChatViewProvider {
       return;
     }
 
-    const userMessage = { role: 'user', content: text };
-    this._messages.push(userMessage);
+    // Add user message
+    const userMsg = { role: 'user', content: text };
+    if (current) current.messages.push(userMsg);
+    await this._saveConversations();
 
-    this._postMessage({ type: 'addMessage', role: 'user', content: text });
+    this._postMessage({
+      type: 'addMessage',
+      role: 'user',
+      content: text,
+    });
+
     this._postMessage({ type: 'generating', isGenerating: true });
 
     this._abortController = new AbortController();
 
     try {
-      const assistantMessage = { role: 'assistant', content: '' };
-      this._messages.push(assistantMessage);
+      const assistantMsg = { role: 'assistant', content: '' };
+      if (current) current.messages.push(assistantMsg);
 
       const messageId = Date.now().toString();
       this._postMessage({
@@ -104,7 +239,7 @@ class ChatViewProvider {
 
       const fullContent = await createChatCompletion(
         model,
-        this._messages,
+        current ? current.messages.slice(0, -1) : [{ role: 'user', content: text }],
         (chunk) => {
           this._postMessage({
             type: 'appendToMessage',
@@ -115,25 +250,27 @@ class ChatViewProvider {
         this._abortController.signal
       );
 
-      assistantMessage.content = fullContent;
+      assistantMsg.content = fullContent;
+      this._updateCurrentTitle(
+        current && current.messages.length > 0 ? current.messages[0].content : text
+      );
+      await this._saveConversations();
     } catch (err) {
-      if (err.message === 'Request aborted') {
-        this._postMessage({
-          type: 'appendToMessage',
-          messageId: '',
-          content: '\n\n[Generation stopped]',
-        });
-      } else {
-        this._postMessage({
-          type: 'addMessage',
-          role: 'assistant',
-          content: `Error: ${err.message}`,
-        });
-      }
+      const errorText =
+        err.message === 'Request aborted'
+          ? '\n\n[Generation stopped]'
+          : `Error: ${err.message}`;
+      this._postMessage({
+        type: 'appendToMessage',
+        messageId: '',
+        content: errorText,
+      });
     }
 
     this._postMessage({ type: 'generating', isGenerating: false });
   }
+
+  // ── Connection Test ──────────────────────────────────────
 
   async _handleTestConnection(index) {
     const model = this._models[index];
@@ -146,13 +283,14 @@ class ChatViewProvider {
     });
 
     const ok = await testConnection(model);
-
     this._postMessage({
       type: 'connectionStatus',
       index,
       status: ok ? 'connected' : 'failed',
     });
   }
+
+  // ── Config File ──────────────────────────────────────────
 
   async _openConfigFile() {
     const workspaceRoot = vscode.workspace.workspaceFolders
@@ -192,6 +330,8 @@ class ChatViewProvider {
     vscode.window.showTextDocument(doc);
   }
 
+  // ── Helpers ──────────────────────────────────────────────
+
   _postMessage(message) {
     if (this._view) {
       this._view.webview.postMessage(message);
@@ -201,6 +341,8 @@ class ChatViewProvider {
   refreshModels() {
     this._loadModels();
   }
+
+  // ── WebView HTML ─────────────────────────────────────────
 
   _getHtml() {
     return `<!DOCTYPE html>
@@ -214,6 +356,7 @@ class ChatViewProvider {
       --bg: #1e1e1e;
       --surface: #252526;
       --surface-hover: #2d2d2d;
+      --surface-active: #333;
       --border: #3c3c3c;
       --text: #cccccc;
       --text-muted: #808080;
@@ -222,15 +365,17 @@ class ChatViewProvider {
       --bot-bg: #2d2d2d;
       --danger: #f14c4c;
       --success: #4ec94e;
+      --sidebar-w: 220px;
     }
+    html, body { height: 100%; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Ubuntu, sans-serif;
       background: var(--bg);
       color: var(--text);
-      height: 100vh;
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      font-size: 13px;
     }
     .toolbar {
       display: flex;
@@ -262,8 +407,10 @@ class ChatViewProvider {
       display: flex;
       align-items: center;
       gap: 4px;
+      white-space: nowrap;
     }
     .toolbar button:hover { background: var(--surface-hover); }
+    .toolbar button.active { background: var(--accent); border-color: var(--accent); }
     .conn-status {
       width: 8px; height: 8px;
       border-radius: 50%;
@@ -276,6 +423,97 @@ class ChatViewProvider {
     .conn-status.failed { background: var(--danger); }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
 
+    /* ── Sidebar layout ── */
+    .main-area {
+      flex: 1;
+      display: flex;
+      overflow: hidden;
+    }
+    .sidebar {
+      width: var(--sidebar-w);
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      transition: width 0.2s, padding 0.2s;
+    }
+    .sidebar.collapsed {
+      width: 0;
+      padding: 0;
+      border: none;
+    }
+    .sidebar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .sidebar-header span {
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+    }
+    .sidebar-header button {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 2px 4px;
+    }
+    .sidebar-header button:hover { color: var(--text); }
+    .conv-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 4px;
+    }
+    .conv-item {
+      display: flex;
+      align-items: center;
+      padding: 6px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      gap: 6px;
+      margin-bottom: 2px;
+    }
+    .conv-item:hover { background: var(--surface-hover); }
+    .conv-item.active { background: var(--surface-active); }
+    .conv-item .conv-title {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 12px;
+    }
+    .conv-item .conv-count {
+      color: var(--text-muted);
+      font-size: 10px;
+      flex-shrink: 0;
+    }
+    .conv-item .conv-del {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 11px;
+      padding: 0 2px;
+      opacity: 0;
+    }
+    .conv-item:hover .conv-del { opacity: 1; }
+    .conv-item .conv-del:hover { color: var(--danger); }
+
+    /* ── Chat area ── */
+    .chat-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
     .messages {
       flex: 1;
       overflow-y: auto;
@@ -292,13 +530,13 @@ class ChatViewProvider {
       font-style: italic;
     }
     .message {
-      max-width: 85%;
+      max-width: 92%;
       padding: 8px 12px;
       border-radius: 8px;
       font-size: 13px;
-      line-height: 1.5;
-      white-space: pre-wrap;
+      line-height: 1.55;
       word-wrap: break-word;
+      overflow-wrap: break-word;
     }
     .message.user {
       align-self: flex-end;
@@ -318,6 +556,64 @@ class ChatViewProvider {
       letter-spacing: 0.5px;
     }
 
+    /* Markdown styles */
+    .message h1, .message h2, .message h3,
+    .message h4, .message h5, .message h6 {
+      margin: 8px 0 4px;
+      line-height: 1.3;
+    }
+    .message h1 { font-size: 16px; }
+    .message h2 { font-size: 15px; }
+    .message h3 { font-size: 14px; }
+    .message p { margin: 4px 0; }
+    .message p:first-child { margin-top: 0; }
+    .message p:last-child { margin-bottom: 0; }
+    .message ul, .message ol { margin: 4px 0; padding-left: 20px; }
+    .message li { margin: 2px 0; }
+    .message code {
+      background: #3c3c3c;
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 12px;
+      font-family: 'Consolas', 'Courier New', monospace;
+    }
+    .message pre {
+      margin: 8px 0;
+      background: #1a1a1a;
+      border-radius: 4px;
+      overflow-x: auto;
+    }
+    .message pre code {
+      display: block;
+      padding: 10px;
+      background: none;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .message blockquote {
+      margin: 4px 0;
+      padding: 4px 8px;
+      border-left: 3px solid var(--accent);
+      color: var(--text-muted);
+    }
+    .message a { color: var(--accent); text-decoration: none; }
+    .message a:hover { text-decoration: underline; }
+    .message hr { border: none; border-top: 1px solid var(--border); margin: 8px 0; }
+    .message img { max-width: 100%; border-radius: 4px; margin: 4px 0; }
+    .message del { opacity: 0.6; }
+    .message table {
+      border-collapse: collapse;
+      margin: 4px 0;
+      font-size: 12px;
+    }
+    .message th, .message td {
+      border: 1px solid var(--border);
+      padding: 4px 8px;
+      text-align: left;
+    }
+    .message th { background: var(--surface); }
+
+    /* ── Input area ── */
     .input-area {
       display: flex;
       gap: 8px;
@@ -339,6 +635,7 @@ class ChatViewProvider {
       max-height: 120px;
     }
     .input-area textarea:focus { outline: 1px solid var(--accent); }
+    .input-area textarea::placeholder { color: var(--text-muted); }
     .input-area button {
       background: var(--accent);
       color: white;
@@ -374,11 +671,12 @@ class ChatViewProvider {
       font-size: 13px;
     }
     .empty-models button:hover { opacity: 0.9; }
-    .hidden { display: none; }
+    .hidden { display: none !important; }
   </style>
 </head>
 <body>
   <div class="toolbar">
+    <button id="sidebarToggle" title="Toggle conversation list">&#9776;</button>
     <select id="modelSelect">
       <option value="">-- Select a model --</option>
     </select>
@@ -388,17 +686,29 @@ class ChatViewProvider {
     <button id="configBtn" title="Open config file">&#9881;</button>
   </div>
 
-  <div id="emptyModels" class="empty-models hidden">
-    <p>No models configured.</p>
-    <p style="font-size:11px;">Create a <code>.vscode/local-llm-models.yaml</code> file to add models.</p>
-    <button id="openConfigBtn">Create Config File</button>
-  </div>
+  <div class="main-area">
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <span>Conversations</span>
+        <button id="closeSidebar">&times;</button>
+      </div>
+      <div class="conv-list" id="convList"></div>
+    </div>
 
-  <div id="messages" class="messages"></div>
+    <div class="chat-area">
+      <div id="emptyModels" class="empty-models hidden">
+        <p>No models configured.</p>
+        <p style="font-size:11px;">Create a <code>.vscode/local-llm-models.yaml</code> file to add models.</p>
+        <button id="openConfigBtn">Create Config File</button>
+      </div>
 
-  <div class="input-area" id="inputArea">
-    <textarea id="input" rows="1" placeholder="Type a message..." disabled></textarea>
-    <button id="sendBtn" disabled>Send</button>
+      <div id="messages" class="messages"></div>
+
+      <div class="input-area" id="inputArea">
+        <textarea id="input" rows="1" placeholder="Type a message..." disabled></textarea>
+        <button id="sendBtn" disabled>Send</button>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -414,20 +724,25 @@ class ChatViewProvider {
       const configBtn = document.getElementById('configBtn');
       const openConfigBtn = document.getElementById('openConfigBtn');
       const emptyModels = document.getElementById('emptyModels');
-      const inputArea = document.getElementById('inputArea');
+      const sidebar = document.getElementById('sidebar');
+      const convList = document.getElementById('convList');
+      const sidebarToggle = document.getElementById('sidebarToggle');
+      const closeSidebar = document.getElementById('closeSidebar');
 
       let isGenerating = false;
       let models = [];
       let modelNames = {};
+      let conversations = [];
+      let currentConvId = null;
+      let messageBuffers = {};
 
-      function autoResize() {
+      // ── Auto-resize ──
+      input.addEventListener('input', function() {
         input.style.height = 'auto';
         input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-      }
+      });
 
-      input.addEventListener('input', autoResize);
-
-      input.addEventListener('keydown', (e) => {
+      input.addEventListener('keydown', function(e) {
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault();
           sendMessage();
@@ -444,29 +759,11 @@ class ChatViewProvider {
         vscode.postMessage({ type: 'sendMessage', text });
       }
 
-      modelSelect.addEventListener('change', () => {
+      // ── Model select ──
+      modelSelect.addEventListener('change', function() {
         const idx = modelSelect.selectedIndex - 1;
         vscode.postMessage({ type: 'selectModel', index: idx });
         updateConnStatus(idx);
-      });
-
-      testBtn.addEventListener('click', () => {
-        const idx = modelSelect.selectedIndex - 1;
-        if (idx >= 0) {
-          vscode.postMessage({ type: 'testConnection', index: idx });
-        }
-      });
-
-      newChatBtn.addEventListener('click', () => {
-        vscode.postMessage({ type: 'newChat' });
-      });
-
-      configBtn.addEventListener('click', () => {
-        vscode.postMessage({ type: 'openConfig' });
-      });
-
-      openConfigBtn.addEventListener('click', () => {
-        vscode.postMessage({ type: 'openConfig' });
       });
 
       function updateConnStatus(idx) {
@@ -478,20 +775,203 @@ class ChatViewProvider {
         }
       }
 
-      window.addEventListener('message', (event) => {
-        const data = event.data;
-        switch (data.type) {
+      // ── Toolbar buttons ──
+      testBtn.addEventListener('click', function() {
+        const idx = modelSelect.selectedIndex - 1;
+        if (idx >= 0) vscode.postMessage({ type: 'testConnection', index: idx });
+      });
+
+      newChatBtn.addEventListener('click', function() {
+        vscode.postMessage({ type: 'newChat' });
+      });
+
+      configBtn.addEventListener('click', function() {
+        vscode.postMessage({ type: 'openConfig' });
+      });
+
+      openConfigBtn.addEventListener('click', function() {
+        vscode.postMessage({ type: 'openConfig' });
+      });
+
+      // ── Sidebar toggle ──
+      sidebarToggle.addEventListener('click', function() {
+        sidebar.classList.toggle('collapsed');
+      });
+      closeSidebar.addEventListener('click', function() {
+        sidebar.classList.add('collapsed');
+      });
+
+      // ── Render conversation list ──
+      function renderConversations() {
+        convList.innerHTML = '';
+        for (const conv of conversations) {
+          const item = document.createElement('div');
+          item.className = 'conv-item' + (conv.id === currentConvId ? ' active' : '');
+
+          const title = document.createElement('span');
+          title.className = 'conv-title';
+          title.textContent = conv.title;
+          item.appendChild(title);
+
+          const count = document.createElement('span');
+          count.className = 'conv-count';
+          count.textContent = conv.messageCount;
+          item.appendChild(count);
+
+          const del = document.createElement('button');
+          del.className = 'conv-del';
+          del.textContent = '\u2715';
+          del.title = 'Delete conversation';
+          del.addEventListener('click', function(e) {
+            e.stopPropagation();
+            vscode.postMessage({ type: 'deleteConversation', id: conv.id });
+          });
+          item.appendChild(del);
+
+          item.addEventListener('click', function() {
+            vscode.postMessage({ type: 'switchConversation', id: conv.id });
+          });
+
+          convList.appendChild(item);
+        }
+      }
+
+      // ── Markdown renderer ──
+      function escapeHtml(text) {
+        return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+      }
+
+      function renderMarkdown(text) {
+        if (!text) return '';
+        const lines = text.split('\n');
+        let html = '';
+        let i = 0;
+
+        function renderInline(t) {
+          if (!t) return '';
+          let r = escapeHtml(t);
+          r = r.replace(/\x60([^\x60]+)\x60/g, '<code>$1</code>');
+          r = r.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2">$1</a>');
+          r = r.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+          r = r.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+          r = r.replace(/\\*([^*]+)\\*/g, '<em>$1</em>');
+          r = r.replace(/_([^_]+)_/g, '<em>$1</em>');
+          r = r.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+          r = r.replace(/!\\[([^\\]]*)\\]\\(([^)]+)\\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:4px;">');
+          return r;
+        }
+
+        while (i < lines.length) {
+          const line = lines[i];
+
+          if (line.trimStart().startsWith('\x60\x60\x60')) {
+            const lang = line.trimStart().slice(3).trim();
+            const codeLines = [];
+            i++;
+            while (i < lines.length && !lines[i].trimStart().startsWith('\x60\x60\x60')) {
+              codeLines.push(lines[i]);
+              i++;
+            }
+            i++;
+            const code = escapeHtml(codeLines.join('\n'));
+            html += '<pre><code' + (lang ? ' class="language-' + escapeHtml(lang) + '"' : '') + '>' + code + '</code></pre>\n';
+            continue;
+          }
+
+          if (line.trimStart().startsWith('> ')) {
+            const qLines = [];
+            while (i < lines.length && lines[i].trimStart().startsWith('> ')) {
+              qLines.push(lines[i].trimStart().slice(2));
+              i++;
+            }
+            html += '<blockquote>' + renderInline(qLines.join('\n')) + '</blockquote>\n';
+            continue;
+          }
+
+          if (/^\\s*[-*+]\\s/.test(line)) {
+            html += '<ul>\n';
+            while (i < lines.length && /^\\s*[-*+]\\s/.test(lines[i])) {
+              html += '<li>' + renderInline(lines[i].replace(/^\\s*[-*+]\\s/, '')) + '</li>\n';
+              i++;
+            }
+            html += '</ul>\n';
+            continue;
+          }
+
+          if (/^\\s*\\d+\\.\\s/.test(line)) {
+            html += '<ol>\n';
+            while (i < lines.length && /^\\s*\\d+\\.\\s/.test(lines[i])) {
+              html += '<li>' + renderInline(lines[i].replace(/^\\s*\\d+\\.\\s/, '')) + '</li>\n';
+              i++;
+            }
+            html += '</ol>\n';
+            continue;
+          }
+
+          const hMatch = line.match(/^(#{1,6})\\s+(.+)$/);
+          if (hMatch) {
+            html += '<h' + hMatch[1].length + '>' + renderInline(hMatch[2]) + '</h' + hMatch[1].length + '>\n';
+            i++;
+            continue;
+          }
+
+          if (line.trim() === '') { i++; continue; }
+
+          const paraLines = [];
+          while (i < lines.length && lines[i].trim() !== '' &&
+                 !lines[i].trimStart().startsWith('\x60\x60\x60') &&
+                 !lines[i].trimStart().startsWith('> ') &&
+                 !/^\\s*[-*+]\\s/.test(lines[i]) &&
+                 !/^\\s*\\d+\\.\\s/.test(lines[i]) &&
+                 !/^#{1,6}\\s/.test(lines[i])) {
+            paraLines.push(lines[i]);
+            i++;
+          }
+          html += '<p>' + renderInline(paraLines.join('\n')) + '</p>\n';
+        }
+        return html;
+      }
+
+      // ── Message rendering helpers ──
+      function createMessageEl(role, content, messageId) {
+        const msgDiv = document.createElement('div');
+        msgDiv.className = 'message ' + role;
+        if (messageId) msgDiv.dataset.messageId = messageId;
+        const label = document.createElement('div');
+        label.className = 'label';
+        label.textContent = role === 'user' ? 'You' : 'Assistant';
+        msgDiv.appendChild(label);
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'content';
+        contentDiv.innerHTML = renderMarkdown(content || '');
+        msgDiv.appendChild(contentDiv);
+        messagesEl.appendChild(msgDiv);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+        return msgDiv;
+      }
+
+      function updateMessageContent(messageId) {
+        const el = messagesEl.querySelector('[data-message-id="' + messageId + '"]');
+        if (el) {
+          el.querySelector('.content').innerHTML = renderMarkdown(messageBuffers[messageId] || '');
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+      }
+
+      // ── Message event handling ──
+      window.addEventListener('message', function(event) {
+        const d = event.data;
+
+        switch (d.type) {
           case 'setModels':
             modelSelect.innerHTML = '<option value="">-- Select a model --</option>';
-            models = data.models || [];
+            models = d.models || [];
             modelNames = {};
-            models.forEach((m, i) => {
+            models.forEach(function(m, i) {
               const opt = document.createElement('option');
               opt.textContent = m.name + ' (' + m.apiBase + ')';
               modelSelect.appendChild(opt);
-              if (i === data.selectedIndex) {
-                modelSelect.selectedIndex = i + 1;
-              }
+              if (i === d.selectedIndex) modelSelect.selectedIndex = i + 1;
             });
             if (models.length > 0) {
               emptyModels.classList.add('hidden');
@@ -505,58 +985,71 @@ class ChatViewProvider {
             updateConnStatus(modelSelect.selectedIndex - 1);
             break;
 
+          case 'setConversations':
+            conversations = d.conversations || [];
+            currentConvId = d.currentId;
+            renderConversations();
+            break;
+
+          case 'loadConversation':
+            messagesEl.innerHTML = '';
+            messageBuffers = {};
+            if (d.modelIndex !== undefined) {
+              modelSelect.selectedIndex = d.modelIndex + 1;
+              updateConnStatus(d.modelIndex);
+            }
+            if (d.messages) {
+              d.messages.forEach(function(msg, idx) {
+                const mid = 'stored-' + idx + '-' + Date.now();
+                messageBuffers[mid] = msg.content || '';
+                createMessageEl(msg.role, msg.content, mid);
+              });
+            }
+            break;
+
           case 'connectionStatus': {
-            const idx = data.index;
+            const idx = d.index;
             const m = models[idx];
             if (m) {
-              modelNames[m.name + m.apiBase] = data.status;
+              modelNames[m.name + m.apiBase] = d.status;
               if (modelSelect.selectedIndex - 1 === idx) {
-                connStatus.className = 'conn-status ' + data.status;
+                connStatus.className = 'conn-status ' + d.status;
               }
             }
             break;
           }
 
-          case 'addMessage': {
-            const msgDiv = document.createElement('div');
-            msgDiv.className = 'message ' + data.role;
-            if (data.messageId) {
-              msgDiv.dataset.messageId = data.messageId;
-            }
-            const label = document.createElement('div');
-            label.className = 'label';
-            label.textContent = data.role === 'user' ? 'You' : 'Assistant';
-            msgDiv.appendChild(label);
-            const contentDiv = document.createElement('div');
-            contentDiv.className = 'content';
-            contentDiv.textContent = data.content || '';
-            msgDiv.appendChild(contentDiv);
-            messagesEl.appendChild(msgDiv);
-            messagesEl.scrollTop = messagesEl.scrollHeight;
-            break;
-          }
-
-          case 'appendToMessage': {
-            const msgs = messagesEl.querySelectorAll('.message.assistant');
-            let target;
-            if (data.messageId) {
-              target = messagesEl.querySelector('[data-message-id="' + data.messageId + '"]');
+          case 'addMessage':
+            if (d.messageId) {
+              messageBuffers[d.messageId] = d.content || '';
+              createMessageEl(d.role, d.content, d.messageId);
             } else {
-              target = msgs[msgs.length - 1];
-            }
-            if (target) {
-              target.querySelector('.content').textContent += data.content;
-              messagesEl.scrollTop = messagesEl.scrollHeight;
+              createMessageEl(d.role, d.content);
             }
             break;
-          }
+
+          case 'appendToMessage':
+            if (d.messageId && messageBuffers[d.messageId] !== undefined) {
+              messageBuffers[d.messageId] += d.content;
+              updateMessageContent(d.messageId);
+            } else if (!d.messageId) {
+              const msgs = messagesEl.querySelectorAll('.message.assistant');
+              const target = msgs[msgs.length - 1];
+              if (target) {
+                const cur = target.querySelector('.content').textContent + d.content;
+                target.querySelector('.content').innerHTML = renderMarkdown(cur);
+                messagesEl.scrollTop = messagesEl.scrollHeight;
+              }
+            }
+            break;
 
           case 'clearMessages':
             messagesEl.innerHTML = '';
+            messageBuffers = {};
             break;
 
           case 'generating':
-            isGenerating = data.isGenerating;
+            isGenerating = d.isGenerating;
             sendBtn.textContent = isGenerating ? 'Stop' : 'Send';
             sendBtn.disabled = false;
             input.disabled = isGenerating;
