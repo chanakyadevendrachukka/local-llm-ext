@@ -1,37 +1,14 @@
-import * as https from 'https';
-import * as http from 'http';
-import { ModelConfig } from './config';
+const https = require('https');
+const http = require('http');
 
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
-
-export interface LLMResponse {
-  content: string;
-  done: boolean;
-}
-
-export function createChatCompletion(
-  config: ModelConfig,
-  messages: ChatMessage[],
-  onChunk: (chunk: string) => void,
-  signal?: AbortSignal
-): Promise<string> {
-  const isOllama = config.provider === 'ollama';
-
-  if (isOllama) {
+function createChatCompletion(config, messages, onChunk, signal) {
+  if (config.provider === 'ollama') {
     return ollamaChat(config, messages, onChunk, signal);
   }
   return openaiChat(config, messages, onChunk, signal);
 }
 
-async function ollamaChat(
-  config: ModelConfig,
-  messages: ChatMessage[],
-  onChunk: (chunk: string) => void,
-  signal?: AbortSignal
-): Promise<string> {
+function ollamaChat(config, messages, onChunk, signal) {
   const url = new URL('/api/chat', config.apiBase);
   const body = JSON.stringify({
     model: config.model,
@@ -43,38 +20,26 @@ async function ollamaChat(
     },
   });
 
-  const fullContent = await streamRequest(
+  return streamRequest(
     url.toString(),
     body,
     onChunk,
     (line) => {
       try {
         const parsed = JSON.parse(line);
-        if (parsed.message?.content) {
+        if (parsed.message && parsed.message.content) {
           return parsed.message.content;
         }
-      } catch {
-        //
-      }
+      } catch {}
       return '';
     },
     signal
   );
-
-  return fullContent;
 }
 
-async function openaiChat(
-  config: ModelConfig,
-  messages: ChatMessage[],
-  onChunk: (chunk: string) => void,
-  signal?: AbortSignal
-): Promise<string> {
+function openaiChat(config, messages, onChunk, signal) {
   const url = new URL('/chat/completions', config.apiBase);
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
+  const headers = { 'Content-Type': 'application/json' };
   if (config.apiKey) {
     headers['Authorization'] = `Bearer ${config.apiKey}`;
   }
@@ -87,7 +52,7 @@ async function openaiChat(
     temperature: config.temperature ?? 0.7,
   });
 
-  const fullContent = await streamRequest(
+  return streamRequest(
     url.toString(),
     body,
     onChunk,
@@ -99,41 +64,29 @@ async function openaiChat(
           const parsed = JSON.parse(data);
           const content = parsed.choices?.[0]?.delta?.content || '';
           return content;
-        } catch {
-          //
-        }
+        } catch {}
       }
       return '';
     },
     signal,
     headers
   );
-
-  return fullContent;
 }
 
-function streamRequest(
-  url: string,
-  body: string,
-  onChunk: (chunk: string) => void,
-  parseLine: (line: string) => string,
-  signal?: AbortSignal,
-  extraHeaders?: Record<string, string>
-): Promise<string> {
+function streamRequest(url, body, onChunk, parseLine, signal, extraHeaders) {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
     const isHttps = parsedUrl.protocol === 'https:';
     const lib = isHttps ? https : http;
 
-    const options: http.RequestOptions = {
+    const headers = { 'Content-Type': 'application/json', ...extraHeaders };
+
+    const options = {
       hostname: parsedUrl.hostname,
       port: parsedUrl.port || (isHttps ? 443 : 80),
       path: parsedUrl.pathname + parsedUrl.search,
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...extraHeaders,
-      },
+      headers,
       signal,
     };
 
@@ -141,16 +94,14 @@ function streamRequest(
       let fullContent = '';
       let buffer = '';
 
-      res.on('data', (chunk: Buffer) => {
+      res.on('data', (chunk) => {
         buffer += chunk.toString();
-
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
         for (const line of lines) {
           const trimmed = line.trim();
           if (!trimmed) continue;
-
           const content = parseLine(trimmed);
           if (content) {
             fullContent += content;
@@ -176,7 +127,7 @@ function streamRequest(
     });
 
     req.on('error', (err) => {
-      if ((err as any).name === 'AbortError') {
+      if (err.name === 'AbortError') {
         reject(new Error('Request aborted'));
       } else {
         reject(new Error(`Request failed: ${err.message}`));
@@ -188,24 +139,14 @@ function streamRequest(
   });
 }
 
-export function testConnection(config: ModelConfig): Promise<boolean> {
+function testConnection(config) {
   return new Promise((resolve) => {
-    let url: URL;
-    let testPath: string;
-
-    if (config.provider === 'ollama') {
-      url = new URL('/api/tags', config.apiBase);
-      testPath = '/api/tags';
-    } else {
-      url = new URL('/models', config.apiBase);
-      testPath = '/models';
-    }
-
+    const testPath = config.provider === 'ollama' ? '/api/tags' : '/models';
     const parsedUrl = new URL(config.apiBase);
     const isHttps = parsedUrl.protocol === 'https:';
     const lib = isHttps ? https : http;
 
-    const options: http.RequestOptions = {
+    const options = {
       hostname: parsedUrl.hostname,
       port: parsedUrl.port || (isHttps ? 443 : 80),
       path: testPath,
@@ -222,7 +163,8 @@ export function testConnection(config: ModelConfig): Promise<boolean> {
       req.destroy();
       resolve(false);
     });
-
     req.end();
   });
 }
+
+module.exports = { createChatCompletion, testConnection };

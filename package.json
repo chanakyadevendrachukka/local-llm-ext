@@ -3,7 +3,7 @@
   "displayName": "Local LLM Chat",
   "description": "Chat with local LLMs via YAML-configured models",
   "version": "0.1.0",
-  "publisher": "local-llm",
+  "publisher": "local-llm-chat",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -12,7 +12,7 @@
     "Other"
   ],
   "activationEvents": [],
-  "main": "./out/extension.js",
+  "main": "./src/extension.js",
   "contributes": {
     "commands": [
       {
@@ -44,19 +44,7 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --tsconfig=tsconfig.json",
-    "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --tsconfig=tsconfig.json --watch",
-    "lint": "eslint src --ext ts"
-  },
-  "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/vscode": "^1.85.0",
-    "esbuild": "^0.24.0",
-    "typescript": "^5.5.0"
-  },
-  "dependencies": {
-    "@vscode/vsce": "^3.9.2",
-    "js-yaml": "^4.1.0"
+    "package": "node tools/package.js",
+    "vscode:prepublish": "node tools/package.js"
   }
 }

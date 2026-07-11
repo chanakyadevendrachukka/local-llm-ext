@@ -1,4 +1,4 @@
 node_modules/
-out/
 *.vsix
 .vscode/local-llm-models.yaml
+package-lock.json

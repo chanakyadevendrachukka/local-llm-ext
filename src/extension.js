@@ -1,7 +1,7 @@
-import * as vscode from 'vscode';
-import { ChatViewProvider } from './chatProvider';
+const vscode = require('vscode');
+const { ChatViewProvider } = require('./chatProvider');
 
-export function activate(context: vscode.ExtensionContext) {
+function activate(context) {
   const chatProvider = new ChatViewProvider(context.extensionUri);
 
   context.subscriptions.push(
@@ -26,4 +26,6 @@ export function activate(context: vscode.ExtensionContext) {
   );
 }
 
-export function deactivate() {}
+function deactivate() {}
+
+module.exports = { activate, deactivate };

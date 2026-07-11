@@ -1,22 +1,20 @@
-import * as vscode from 'vscode';
-import { ModelConfig, loadConfig, getConfigYamlTemplate } from './config';
-import { ChatMessage, createChatCompletion, testConnection } from './llmClient';
+const vscode = require('vscode');
+const { loadConfig, getConfigYamlTemplate } = require('./config');
+const { createChatCompletion, testConnection } = require('./llmClient');
 
-export class ChatViewProvider implements vscode.WebviewViewProvider {
-  public static readonly viewType = 'local-llm-chat.chatView';
+class ChatViewProvider {
+  static viewType = 'local-llm-chat.chatView';
 
-  private _view?: vscode.WebviewView;
-  private _models: ModelConfig[] = [];
-  private _messages: ChatMessage[] = [];
-  private _abortController?: AbortController;
+  constructor(extensionUri) {
+    this._extensionUri = extensionUri;
+    this._view = undefined;
+    this._models = [];
+    this._messages = [];
+    this._abortController = undefined;
+    this._selectedModelIndex = 0;
+  }
 
-  constructor(private readonly _extensionUri: vscode.Uri) {}
-
-  resolveWebviewView(
-    webviewView: vscode.WebviewView,
-    _context: vscode.WebviewViewResolveContext,
-    _token: vscode.CancellationToken
-  ): void {
+  resolveWebviewView(webviewView, _context, _token) {
     this._view = webviewView;
 
     webviewView.webview.options = {
@@ -38,12 +36,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case 'newChat':
           this._messages = [];
-          this._postMessage({
-            type: 'clearMessages',
-          });
+          this._postMessage({ type: 'clearMessages' });
           break;
         case 'stopGeneration':
-          this._abortController?.abort();
+          if (this._abortController) {
+            this._abortController.abort();
+          }
           break;
         case 'openConfig':
           await this._openConfigFile();
@@ -55,10 +53,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private _selectedModelIndex: number = 0;
-
-  private _loadModels(): void {
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath;
+  _loadModels() {
+    const workspaceRoot = vscode.workspace.workspaceFolders
+      ? vscode.workspace.workspaceFolders[0].uri.fsPath
+      : undefined;
     const config = loadConfig(workspaceRoot);
     this._models = config.models;
 
@@ -73,7 +71,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async _handleSendMessage(text: string): Promise<void> {
+  async _handleSendMessage(text) {
     if (!text.trim()) return;
 
     const model = this._models[this._selectedModelIndex];
@@ -84,24 +82,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const userMessage: ChatMessage = { role: 'user', content: text };
+    const userMessage = { role: 'user', content: text };
     this._messages.push(userMessage);
 
-    this._postMessage({
-      type: 'addMessage',
-      role: 'user',
-      content: text,
-    });
-
+    this._postMessage({ type: 'addMessage', role: 'user', content: text });
     this._postMessage({ type: 'generating', isGenerating: true });
 
     this._abortController = new AbortController();
 
     try {
-      const assistantMessage: ChatMessage = {
-        role: 'assistant',
-        content: '',
-      };
+      const assistantMessage = { role: 'assistant', content: '' };
       this._messages.push(assistantMessage);
 
       const messageId = Date.now().toString();
@@ -126,7 +116,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       );
 
       assistantMessage.content = fullContent;
-    } catch (err: any) {
+    } catch (err) {
       if (err.message === 'Request aborted') {
         this._postMessage({
           type: 'appendToMessage',
@@ -134,11 +124,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           content: '\n\n[Generation stopped]',
         });
       } else {
-        const errorMsg = `Error: ${err.message}`;
         this._postMessage({
           type: 'addMessage',
           role: 'assistant',
-          content: errorMsg,
+          content: `Error: ${err.message}`,
         });
       }
     }
@@ -146,7 +135,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this._postMessage({ type: 'generating', isGenerating: false });
   }
 
-  private async _handleTestConnection(index: number): Promise<void> {
+  async _handleTestConnection(index) {
     const model = this._models[index];
     if (!model) return;
 
@@ -165,8 +154,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async _openConfigFile(): Promise<void> {
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
+  async _openConfigFile() {
+    const workspaceRoot = vscode.workspace.workspaceFolders
+      ? vscode.workspace.workspaceFolders[0].uri
+      : undefined;
+
     if (!workspaceRoot) {
       vscode.window.showInformationMessage(
         'Open a workspace first, or create ~/.local-llm-models.yaml'
@@ -200,15 +192,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     vscode.window.showTextDocument(doc);
   }
 
-  private _postMessage(message: any): void {
-    this._view?.webview.postMessage(message);
+  _postMessage(message) {
+    if (this._view) {
+      this._view.webview.postMessage(message);
+    }
   }
 
-  refreshModels(): void {
+  refreshModels() {
     this._loadModels();
   }
 
-  private _getHtml(): string {
+  _getHtml() {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -270,7 +264,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       gap: 4px;
     }
     .toolbar button:hover { background: var(--surface-hover); }
-    .toolbar button.active { background: var(--accent); border-color: var(--accent); }
     .conn-status {
       width: 8px; height: 8px;
       border-radius: 50%;
@@ -512,7 +505,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             updateConnStatus(modelSelect.selectedIndex - 1);
             break;
 
-          case 'connectionStatus':
+          case 'connectionStatus': {
             const idx = data.index;
             const m = models[idx];
             if (m) {
@@ -522,8 +515,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               }
             }
             break;
+          }
 
-          case 'addMessage':
+          case 'addMessage': {
             const msgDiv = document.createElement('div');
             msgDiv.className = 'message ' + data.role;
             if (data.messageId) {
@@ -540,8 +534,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             messagesEl.appendChild(msgDiv);
             messagesEl.scrollTop = messagesEl.scrollHeight;
             break;
+          }
 
-          case 'appendToMessage':
+          case 'appendToMessage': {
             const msgs = messagesEl.querySelectorAll('.message.assistant');
             let target;
             if (data.messageId) {
@@ -554,6 +549,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
               messagesEl.scrollTop = messagesEl.scrollHeight;
             }
             break;
+          }
 
           case 'clearMessages':
             messagesEl.innerHTML = '';
@@ -576,3 +572,5 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </html>`;
   }
 }
+
+module.exports = { ChatViewProvider };
