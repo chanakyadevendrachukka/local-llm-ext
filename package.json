@@ -1,0 +1,62 @@
+{
+  "name": "local-llm-chat",
+  "displayName": "Local LLM Chat",
+  "description": "Chat with local LLMs via YAML-configured models",
+  "version": "0.1.0",
+  "publisher": "local-llm",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "local-llm-chat.openChat",
+        "title": "Local LLM Chat: Open Chat"
+      },
+      {
+        "command": "local-llm-chat.refreshModels",
+        "title": "Local LLM Chat: Refresh Models from Config"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "local-llm-chat",
+          "title": "Local LLM Chat",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "local-llm-chat": [
+        {
+          "type": "webview",
+          "id": "local-llm-chat.chatView",
+          "name": "Chat"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --tsconfig=tsconfig.json",
+    "watch": "esbuild src/extension.ts --bundle --outfile=out/extension.js --external:vscode --format=cjs --platform=node --tsconfig=tsconfig.json --watch",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.5.0"
+  },
+  "dependencies": {
+    "@vscode/vsce": "^3.9.2",
+    "js-yaml": "^4.1.0"
+  }
+}
