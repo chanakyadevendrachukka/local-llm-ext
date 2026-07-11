@@ -1,4 +1,5 @@
 const vscode = require('vscode');
+const path = require('path');
 const { loadConfig, getConfigYamlTemplate } = require('./config');
 const { createChatCompletion, testConnection } = require('./llmClient');
 
@@ -307,28 +308,29 @@ class ChatViewProvider {
   // ── Config File ──────────────────────────────────────────
 
   async _openConfigFile() {
+    let configFile;
+
     const workspaceRoot = vscode.workspace.workspaceFolders
       ? vscode.workspace.workspaceFolders[0].uri
       : undefined;
 
-    if (!workspaceRoot) {
-      vscode.window.showInformationMessage(
-        'Open a workspace first, or create ~/.local-llm-models.yaml'
+    if (workspaceRoot) {
+      configFile = vscode.Uri.joinPath(
+        workspaceRoot,
+        '.vscode',
+        'local-llm-models.yaml'
       );
-      return;
-    }
-
-    const configDir = vscode.Uri.joinPath(workspaceRoot, '.vscode');
-    const configFile = vscode.Uri.joinPath(
-      workspaceRoot,
-      '.vscode',
-      'local-llm-models.yaml'
-    );
-
-    try {
-      await vscode.workspace.fs.stat(configDir);
-    } catch {
-      await vscode.workspace.fs.createDirectory(configDir);
+      const configDir = vscode.Uri.joinPath(workspaceRoot, '.vscode');
+      try {
+        await vscode.workspace.fs.stat(configDir);
+      } catch {
+        await vscode.workspace.fs.createDirectory(configDir);
+      }
+    } else {
+      const homeDir = process.env.HOME || process.env.USERPROFILE || '';
+      configFile = vscode.Uri.file(
+        path.join(homeDir, '.local-llm-models.yaml')
+      );
     }
 
     try {
@@ -338,6 +340,7 @@ class ChatViewProvider {
         configFile,
         Buffer.from(getConfigYamlTemplate(), 'utf-8')
       );
+      this._loadModels();
     }
 
     const doc = await vscode.workspace.openTextDocument(configFile);
