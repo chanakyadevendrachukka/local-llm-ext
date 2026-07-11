@@ -24,7 +24,7 @@ class ChatViewProvider {
 
   _loadConversations() {
     const stored = this._context.globalState.get(STORAGE_KEY, []);
-    this._conversations = stored;
+    this._conversations = Array.isArray(stored) ? stored : [];
     if (this._conversations.length === 0) {
       this._newConversation();
     } else {
@@ -67,14 +67,25 @@ class ChatViewProvider {
     const conv = this._conversations.find((c) => c.id === id);
     if (!conv) return;
 
-    // Save current conversation's messages
+    if (this._abortController) {
+      this._abortController.abort();
+      this._abortController = undefined;
+    }
+
     const current = this._getCurrentConversation();
     if (current) {
       current.modelIndex = this._selectedModelIndex;
+      this._saveConversations();
     }
 
     this._currentId = id;
     this._selectedModelIndex = conv.modelIndex || 0;
+    this._postMessage({ type: 'generating', isGenerating: false });
+    this._postMessage({
+      type: 'setConversations',
+      conversations: this._getConversationList(),
+      currentId: this._currentId,
+    });
     this._postMessage({
       type: 'loadConversation',
       messages: conv.messages,
@@ -143,6 +154,7 @@ class ChatViewProvider {
           break;
         case 'newChat':
           this._newConversation();
+          this._postMessage({ type: 'generating', isGenerating: false });
           this._postMessage({ type: 'clearMessages' });
           this._postMessage({
             type: 'setConversations',
@@ -223,13 +235,15 @@ class ChatViewProvider {
 
     this._postMessage({ type: 'generating', isGenerating: true });
 
-    this._abortController = new AbortController();
+      this._abortController = new AbortController();
+
+    let messageId;
 
     try {
       const assistantMsg = { role: 'assistant', content: '' };
       if (current) current.messages.push(assistantMsg);
 
-      const messageId = Date.now().toString();
+      messageId = Date.now().toString();
       this._postMessage({
         type: 'addMessage',
         role: 'assistant',
@@ -262,7 +276,7 @@ class ChatViewProvider {
           : `Error: ${err.message}`;
       this._postMessage({
         type: 'appendToMessage',
-        messageId: '',
+        messageId: typeof messageId !== 'undefined' ? messageId : '',
         content: errorText,
       });
     }
@@ -431,17 +445,21 @@ class ChatViewProvider {
     }
     .sidebar {
       width: var(--sidebar-w);
+      min-width: 0;
+      flex-shrink: 0;
       background: var(--surface);
       border-right: 1px solid var(--border);
       display: flex;
       flex-direction: column;
       overflow: hidden;
-      transition: width 0.2s, padding 0.2s;
+      transition: width 0.15s ease, padding 0.15s ease, border 0.15s ease;
     }
     .sidebar.collapsed {
-      width: 0;
-      padding: 0;
-      border: none;
+      width: 0 !important;
+      min-width: 0 !important;
+      padding: 0 !important;
+      border: none !important;
+      overflow: hidden !important;
     }
     .sidebar-header {
       display: flex;
@@ -687,7 +705,7 @@ class ChatViewProvider {
   </div>
 
   <div class="main-area">
-    <div class="sidebar" id="sidebar">
+    <div class="sidebar collapsed" id="sidebar">
       <div class="sidebar-header">
         <span>Conversations</span>
         <button id="closeSidebar">&times;</button>
@@ -804,6 +822,13 @@ class ChatViewProvider {
       // ── Render conversation list ──
       function renderConversations() {
         convList.innerHTML = '';
+        if (!conversations || conversations.length === 0) {
+          const empty = document.createElement('div');
+          empty.style.cssText = 'padding:12px;color:var(--text-muted);font-size:11px;text-align:center;';
+          empty.textContent = 'No conversations';
+          convList.appendChild(empty);
+          return;
+        }
         for (const conv of conversations) {
           const item = document.createElement('div');
           item.className = 'conv-item' + (conv.id === currentConvId ? ' active' : '');
@@ -850,14 +875,14 @@ class ChatViewProvider {
         function renderInline(t) {
           if (!t) return '';
           let r = escapeHtml(t);
-          r = r.replace(/\x60([^\x60]+)\x60/g, '<code>$1</code>');
+          r = r.replace(/!\\[([^\\]]*)\\]\\(([^)]+)\\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:4px;">');
           r = r.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g, '<a href="$2">$1</a>');
+          r = r.replace(/\x60([^\x60]+)\x60/g, '<code>$1</code>');
           r = r.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
           r = r.replace(/__([^_]+)__/g, '<strong>$1</strong>');
           r = r.replace(/\\*([^*]+)\\*/g, '<em>$1</em>');
           r = r.replace(/_([^_]+)_/g, '<em>$1</em>');
           r = r.replace(/~~([^~]+)~~/g, '<del>$1</del>');
-          r = r.replace(/!\\[([^\\]]*)\\]\\(([^)]+)\\)/g, '<img src="$2" alt="$1" style="max-width:100%;border-radius:4px;">');
           return r;
         }
 
