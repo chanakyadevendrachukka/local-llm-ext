@@ -1,10 +1,13 @@
 const vscode = require('vscode');
 const { ChatViewProvider } = require('./chatProvider');
 
-function activate(context) {
-  console.log('Local LLM Chat: activating');
+let outputChannel;
 
-  const chatProvider = new ChatViewProvider(context);
+function activate(context) {
+  outputChannel = vscode.window.createOutputChannel('Local LLM Chat');
+  outputChannel.appendLine('Extension activating...');
+
+  const chatProvider = new ChatViewProvider(context, outputChannel);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
@@ -16,9 +19,7 @@ function activate(context) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand('local-llm-chat.openChat', () => {
-      vscode.commands.executeCommand(
-        'workbench.view.extension.local-llm-chat'
-      );
+      vscode.commands.executeCommand('workbench.view.extension.local-llm-chat');
     })
   );
 
@@ -28,7 +29,7 @@ function activate(context) {
     })
   );
 
-  console.log('Local LLM Chat: activated');
+  outputChannel.appendLine('Extension activated');
 }
 
 function deactivate() {}

@@ -1,12 +1,14 @@
 const fs = require('fs');
 const path = require('path');
 
+const CONFIG_FILENAME = '.vscode/local-llm-models.yaml';
+
 function parseYaml(text) {
   const rawLines = text.split('\n').map(l => l.replace(/\t/g, '  '));
   const lines = [];
   for (const l of rawLines) {
-    const trimmed = l.trim();
-    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    const t = l.trim();
+    if (t === '' || t.startsWith('#')) continue;
     lines.push(l);
   }
 
@@ -107,69 +109,36 @@ function parseScalar(val) {
   return val;
 }
 
-const CONFIG_FILENAME = '.vscode/local-llm-models.yaml';
+function getConfigPaths(workspaceRoot) {
+  const paths = [];
+  if (workspaceRoot) {
+    paths.push(path.join(workspaceRoot, CONFIG_FILENAME));
+  }
+  paths.push(path.join(
+    process.env.HOME || process.env.USERPROFILE || '/tmp',
+    '.local-llm-models.yaml'
+  ));
+  return paths;
+}
 
 function loadConfig(workspaceRoot) {
-  const defaultConfig = { models: [] };
-
-  const possiblePaths = [];
-
-  if (workspaceRoot) {
-    possiblePaths.push(path.join(workspaceRoot, CONFIG_FILENAME));
-  }
-
-  const homeConfig = path.join(
-    process.env.HOME || process.env.USERPROFILE || '',
-    '.local-llm-models.yaml'
-  );
-  possiblePaths.push(homeConfig);
-
-  let foundPath = null;
-  let parseError = null;
-
-  for (const configPath of possiblePaths) {
+  const paths = getConfigPaths(workspaceRoot);
+  for (const configPath of paths) {
     if (fs.existsSync(configPath)) {
       try {
         const content = fs.readFileSync(configPath, 'utf-8');
         const parsed = parseYaml(content);
         if (parsed && Array.isArray(parsed.models)) {
-          return Object.assign(parsed, {
-            _debug: { found: configPath, pathsChecked: possiblePaths, error: null },
-          });
+          return { models: parsed.models, configPath: configPath };
         }
-        foundPath = configPath;
-        parseError = 'Config file found but no "models" array';
-      } catch (err) {
-        foundPath = configPath;
-        parseError = err.message;
-      }
+      } catch (_) {}
     }
   }
-
-  return Object.assign(defaultConfig, {
-    _debug: { found: foundPath, pathsChecked: possiblePaths, error: parseError },
-  });
+  return { models: [], configPath: null };
 }
 
 function getConfigYamlTemplate() {
-  return `# Local LLM Chat - Model Configuration
-models:
-  - name: "Llama 3 (Ollama)"
-    provider: "ollama"
-    apiBase: "http://localhost:11434"
-    model: "llama3"
-    maxTokens: 2048
-    temperature: 0.7
-  - name: "Mistral (OpenAI-compatible)"
-    provider: "openai"
-    apiBase: "http://localhost:1234/v1"
-    model: "mistral"
-    apiKey: ""
-  - name: "DeepSeek (Ollama)"
-    provider: "ollama"
-    apiBase: "http://192.168.1.100:11434"
-    model: "deepseek-coder:6.7b"
-`;
+  return '# Local LLM Chat - Model Configuration\nmodels:\n  - name: "Llama 3 (Ollama)"\n    provider: "ollama"\n    apiBase: "http://localhost:11434"\n    model: "llama3"\n    maxTokens: 2048\n    temperature: 0.7\n  - name: "Mistral (OpenAI-compatible)"\n    provider: "openai"\n    apiBase: "http://localhost:1234/v1"\n    model: "mistral"\n    apiKey: ""\n';
 }
 
-module.exports = { loadConfig, getConfigYamlTemplate };
+module.exports = { loadConfig, getConfigYamlTemplate, getConfigPaths };

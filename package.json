@@ -2,7 +2,7 @@
   "name": "local-llm-chat",
   "displayName": "Local LLM Chat",
   "description": "Chat with local LLMs via YAML-configured models",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "local-llm-chat",
   "engines": {
     "vscode": "^1.85.0"
@@ -11,7 +11,9 @@
     "Chat",
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onView:local-llm-chat.chatView"
+  ],
   "main": "./src/extension.js",
   "contributes": {
     "commands": [
