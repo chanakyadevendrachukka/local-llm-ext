@@ -124,21 +124,31 @@ function loadConfig(workspaceRoot) {
   );
   possiblePaths.push(homeConfig);
 
+  let foundPath = null;
+  let parseError = null;
+
   for (const configPath of possiblePaths) {
     if (fs.existsSync(configPath)) {
       try {
         const content = fs.readFileSync(configPath, 'utf-8');
         const parsed = parseYaml(content);
         if (parsed && Array.isArray(parsed.models)) {
-          return parsed;
+          return Object.assign(parsed, {
+            _debug: { found: configPath, pathsChecked: possiblePaths, error: null },
+          });
         }
+        foundPath = configPath;
+        parseError = 'Config file found but no "models" array';
       } catch (err) {
-        // Silently skip invalid configs
+        foundPath = configPath;
+        parseError = err.message;
       }
     }
   }
 
-  return defaultConfig;
+  return Object.assign(defaultConfig, {
+    _debug: { found: foundPath, pathsChecked: possiblePaths, error: parseError },
+  });
 }
 
 function getConfigYamlTemplate() {

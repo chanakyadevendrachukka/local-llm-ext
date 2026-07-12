@@ -1,5 +1,6 @@
 const vscode = require('vscode');
 const path = require('path');
+const fs = require('fs');
 const { loadConfig, getConfigYamlTemplate } = require('./config');
 const { createChatCompletion, testConnection } = require('./llmClient');
 
@@ -10,6 +11,7 @@ class ChatViewProvider {
   static viewType = 'local-llm-chat.chatView';
 
   constructor(context) {
+    console.log('Local LLM Chat: ChatViewProvider constructor');
     this._context = context;
     this._view = undefined;
     this._models = [];
@@ -19,6 +21,7 @@ class ChatViewProvider {
     this._conversations = [];
     this._currentId = null;
     this._loadConversations();
+    console.log('Local LLM Chat: ChatViewProvider constructed, conversations:', this._conversations.length);
   }
 
   // ── Conversation Persistence ─────────────────────────────
@@ -132,14 +135,37 @@ class ChatViewProvider {
   // ── WebView Lifecycle ────────────────────────────────────
 
   resolveWebviewView(webviewView, _context, _token) {
+    console.log('Local LLM Chat: resolveWebviewView called');
     this._view = webviewView;
 
     webviewView.webview.options = { enableScripts: true };
-    webviewView.webview.html = this._getHtml();
+
+    // Try to set the main HTML; fall back to diagnostic page on error
+    try {
+      const html = this._getHtml();
+      console.log('Local LLM Chat: HTML generated, length:', html.length);
+      webviewView.webview.html = html;
+    } catch (err) {
+      console.error('Local LLM Chat: _getHtml() failed', err);
+      webviewView.webview.html = this._getFallbackHtml('_getHtml() error: ' + err.message);
+      return;
+    }
+
+    // Send initial data immediately (don't wait for 'ready')
+    this._loadModels();
+    this._postMessage({
+      type: 'setConversations',
+      conversations: this._getConversationList(),
+      currentId: this._currentId,
+    });
+
+    console.log('Local LLM Chat: resolveWebviewView complete, models:', this._models.length);
 
     webviewView.webview.onDidReceiveMessage(async (data) => {
       switch (data.type) {
         case 'ready':
+          console.log('Local LLM Chat: WebView ready');
+          // Re-send in case WebView missed the initial messages
           this._loadModels();
           this._postMessage({
             type: 'setConversations',
@@ -191,7 +217,7 @@ class ChatViewProvider {
       ? vscode.workspace.workspaceFolders[0].uri.fsPath
       : undefined;
     const config = loadConfig(workspaceRoot);
-    this._models = config.models;
+    this._models = config.models || [];
 
     this._postMessage({
       type: 'setModels',
@@ -201,6 +227,11 @@ class ChatViewProvider {
         model: m.model,
       })),
       selectedIndex: this._selectedModelIndex,
+    });
+
+    this._postMessage({
+      type: 'configDebug',
+      debug: config._debug || null,
     });
   }
 
@@ -360,6 +391,29 @@ class ChatViewProvider {
   }
 
   // ── WebView HTML ─────────────────────────────────────────
+
+  _getFallbackHtml(errorMsg) {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chat</title>
+  <style>
+    body { font-family: sans-serif; padding: 16px; background: #1e1e1e; color: #ccc; }
+    h2 { color: #f14c4c; }
+    pre { background: #252526; padding: 8px; border-radius: 4px; overflow: auto; font-size: 12px; }
+    button { background: #0078d4; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h2>Local LLM Chat - Error</h2>
+  <p>Failed to load the chat interface.</p>
+  <pre>${errorMsg}</pre>
+  <p>Check the VS Code Developer Tools console (Help &rarr; Toggle Developer Tools) for details.</p>
+</body>
+</html>`;
+  }
 
   _getHtml() {
     return `<!DOCTYPE html>
@@ -719,7 +773,8 @@ class ChatViewProvider {
     <div class="chat-area">
       <div id="emptyModels" class="empty-models hidden">
         <p>No models configured.</p>
-        <p style="font-size:11px;">Create a <code>.vscode/local-llm-models.yaml</code> file to add models.</p>
+        <p style="font-size:11px;">Create a <code>.vscode/local-llm-models.yaml</code> file in your workspace, or <code>~/.local-llm-models.yaml</code> globally.</p>
+        <pre id="configDebug" style="font-size:10px;text-align:left;background:#1a1a1a;padding:6px;border-radius:4px;overflow:auto;max-height:140px;margin:8px 0;word-break:break-all;"></pre>
         <button id="openConfigBtn">Create Config File</button>
       </div>
 
@@ -1011,6 +1066,25 @@ class ChatViewProvider {
               sendBtn.disabled = true;
             }
             updateConnStatus(modelSelect.selectedIndex - 1);
+            break;
+
+          case 'configDebug':
+            if (d.debug) {
+              var debugEl = document.getElementById('configDebug');
+              if (debugEl) {
+                var txt = '';
+                (d.debug.pathsChecked || []).forEach(function(p, i) {
+                  txt += (i === 0 ? 'Workspace: ' : 'Global:    ') + p + '\n';
+                });
+                if (d.debug.found) {
+                  txt += 'Found: ' + d.debug.found + '\n';
+                }
+                if (d.debug.error) {
+                  txt += 'Error: ' + d.debug.error;
+                }
+                debugEl.textContent = txt;
+              }
+            }
             break;
 
           case 'setConversations':

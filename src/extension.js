@@ -2,12 +2,15 @@ const vscode = require('vscode');
 const { ChatViewProvider } = require('./chatProvider');
 
 function activate(context) {
+  console.log('Local LLM Chat: activating');
+
   const chatProvider = new ChatViewProvider(context);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
       ChatViewProvider.viewType,
-      chatProvider
+      chatProvider,
+      { webviewOptions: { retainContextWhenHidden: true } }
     )
   );
 
@@ -24,6 +27,8 @@ function activate(context) {
       chatProvider.refreshModels();
     })
   );
+
+  console.log('Local LLM Chat: activated');
 }
 
 function deactivate() {}
