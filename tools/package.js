@@ -10,7 +10,7 @@ const zlib = require('zlib');
 
 const ROOT = path.resolve(__dirname, '..');
 const NAME = 'local-llm-chat';
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const VSIX_FILE = path.join(ROOT, `${NAME}-${VERSION}.vsix`);
 
 const EXTENSION_FILES = [
@@ -19,6 +19,7 @@ const EXTENSION_FILES = [
   { path: 'extension/src/llmClient.js', src: 'src/llmClient.js' },
   { path: 'extension/src/chatProvider.js', src: 'src/chatProvider.js' },
   { path: 'extension/src/extension.js', src: 'src/extension.js' },
+  { path: 'extension/src/chatView.html', src: 'src/chatView.html' },
 ];
 
 function crc32(data) {
@@ -133,6 +134,7 @@ function makeContentTypes() {
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="json" ContentType="application/json" />
   <Default Extension="js" ContentType="text/javascript" />
+  <Default Extension="html" ContentType="text/html" />
   <Default Extension="yaml" ContentType="text/yaml" />
 </Types>`;
 }
