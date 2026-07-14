@@ -52,12 +52,31 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
 .msg a { color:var(--accent); text-decoration:none; }
 .msg a:hover { text-decoration:underline; }
 .msg img { max-width:100%; border-radius:4px; }
+#contextBar { display:flex; align-items:center; gap:4px; padding:3px 8px; border-top:1px solid var(--border); flex-shrink:0; flex-wrap:wrap; min-height:26px; }
+#contextBar .ctx-btn { background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:2px 6px; cursor:pointer; font-size:11px; white-space:nowrap; }
+#contextBar .ctx-btn:hover { background:var(--surface-hover); }
+#contextBar .ctx-label { font-size:10px; color:var(--text-muted); margin-right:4px; text-transform:uppercase; }
+.ctx-chip { display:inline-flex; align-items:center; gap:3px; background:#094771; border-radius:3px; padding:1px 4px 1px 6px; font-size:11px; max-width:160px; }
+.ctx-chip .ctx-path { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ctx-chip .ctx-remove { background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:10px; padding:0 1px; line-height:1; }
+.ctx-chip .ctx-remove:hover { color:var(--danger); }
 #inputArea { display:flex; gap:6px; padding:6px 8px; border-top:1px solid var(--border); flex-shrink:0; }
 #inputArea textarea { flex:1; background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:3px; padding:6px 8px; font-size:13px; font-family:inherit; resize:none; min-height:32px; max-height:120px; }
 #inputArea textarea:focus { outline:1px solid var(--accent); }
 #inputArea button { background:var(--accent); color:#fff; border:none; border-radius:3px; padding:6px 14px; cursor:pointer; font-size:13px; }
 #inputArea button:hover { opacity:0.9; }
 #inputArea button:disabled { opacity:0.4; cursor:not-allowed; }
+.thinking-block { margin:4px 0; background:#1a1a2e; border-radius:4px; border:1px solid #2a2a4e; }
+.thinking-block[open] { background:#12122a; }
+.thinking-block summary { cursor:pointer; padding:4px 8px; font-size:11px; color:#8888cc; font-weight:600; user-select:none; }
+.thinking-block summary:hover { color:#aaaaff; }
+.thinking-block .thinking-content { padding:4px 8px 8px; font-size:12px; color:#9999bb; line-height:1.5; border-top:1px solid #2a2a4e; }
+.thinking-indicator { display:flex; align-items:center; gap:6px; color:#8888cc; font-size:11px; margin:4px 0; padding:4px 8px; }
+.thinking-dots { display:inline-flex; align-items:center; gap:3px; }
+.thinking-dot { width:4px;height:4px;border-radius:50%;background:#8888cc;animation:thinkPulse 1.2s ease-in-out infinite; }
+.thinking-dot:nth-child(2) { animation-delay:0.2s; }
+.thinking-dot:nth-child(3) { animation-delay:0.4s; }
+@keyframes thinkPulse { 0%,80%,100% { opacity:0.3; } 40% { opacity:1; } }
 #emptyModels { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:20px; text-align:center; color:var(--text-muted); gap:10px; }
 #emptyModels p { font-size:13px; }
 #emptyModels pre { font-size:10px; text-align:left; background:#1a1a1a; padding:6px; border-radius:3px; overflow:auto; max-height:140px; margin:6px 0; word-break:break-all; }
@@ -83,11 +102,17 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
   <div id="chatArea">
     <div id="emptyModels" class="hidden">
       <p>No models configured.</p>
-      <p style="font-size:11px;">Create a config file in .vscode/ or ~/.local-llm-models.yaml</p>
+      <p style="font-size:11px;">Create a config.yaml in the repo root</p>
       <pre id="configDebug" class="hidden"></pre>
       <button id="openConfigBtn">Create Config File</button>
     </div>
     <div id="messages"></div>
+    <div id="contextBar">
+      <span class="ctx-label">Context</span>
+      <span id="ctxChips"></span>
+      <button class="ctx-btn" id="ctxAddCurrentBtn" title="Add current editor file">+ File</button>
+      <button class="ctx-btn" id="ctxBrowseBtn" title="Browse for files">+ Browse</button>
+    </div>
     <div id="inputArea">
       <textarea id="input" rows="1" placeholder="Type a message..." disabled></textarea>
       <button id="sendBtn" disabled>Send</button>
@@ -123,6 +148,9 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
   var convList = document.getElementById('convList');
   var sidebarToggle = document.getElementById('sidebarToggle');
   var closeSidebar = document.getElementById('closeSidebar');
+  var ctxAddCurrentBtn = document.getElementById('ctxAddCurrentBtn');
+  var ctxBrowseBtn = document.getElementById('ctxBrowseBtn');
+  var ctxChips = document.getElementById('ctxChips');
 
   if (!messagesEl || !input || !sendBtn) {
     vscode.postMessage({ type: 'webviewError', message: 'Required DOM elements not found' });
@@ -135,6 +163,7 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
   var conversations = [];
   var currentConvId = null;
   var messageBuffers = {};
+  var thinkingBuffers = {};
 
   // Auto-resize
   input.addEventListener('input', function() {
@@ -193,6 +222,18 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
   closeSidebar.addEventListener('click', function() {
     sidebar.classList.add('collapsed');
   });
+
+  if (ctxAddCurrentBtn) {
+    ctxAddCurrentBtn.addEventListener('click', function() {
+      vscode.postMessage({ type: 'addContextFile', path: '__active_editor__' });
+    });
+  }
+
+  if (ctxBrowseBtn) {
+    ctxBrowseBtn.addEventListener('click', function() {
+      vscode.postMessage({ type: 'pickContextFile' });
+    });
+  }
 
   function updateConnStatus(idx) {
     connStatus.className = 'conn-status unknown';
@@ -354,7 +395,7 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
 
   // ── Message rendering ──
 
-  function createMessageEl(role, content, messageId) {
+  function createMessageEl(role, content, messageId, thinkingContent) {
     if (messageId && messageBuffers[messageId] === undefined) {
       messageBuffers[messageId] = content || '';
     }
@@ -366,6 +407,35 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
     label.className = 'label';
     label.textContent = role === 'user' ? 'You' : 'Assistant';
     el.appendChild(label);
+
+    if (role !== 'user' && messageId) {
+      thinkingBuffers[messageId] = '';
+
+      var indicator = document.createElement('div');
+      indicator.className = 'thinking-indicator';
+      indicator.dataset.indicatorId = messageId;
+      indicator.textContent = 'Thinking';
+      var dots = document.createElement('span');
+      dots.className = 'thinking-dots';
+      dots.innerHTML = '<span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span>';
+      indicator.appendChild(dots);
+      el.appendChild(indicator);
+    }
+
+    if (role !== 'user' && thinkingContent) {
+      var thinkingBlock = document.createElement('details');
+      thinkingBlock.className = 'thinking-block';
+      thinkingBlock.open = true;
+      if (messageId) thinkingBlock.dataset.thinkingId = messageId;
+      var summary = document.createElement('summary');
+      summary.textContent = 'Thinking';
+      thinkingBlock.appendChild(summary);
+      var thinkingDiv = document.createElement('div');
+      thinkingDiv.className = 'thinking-content';
+      thinkingDiv.innerHTML = renderMarkdown(thinkingContent);
+      thinkingBlock.appendChild(thinkingDiv);
+      el.appendChild(thinkingBlock);
+    }
 
     var contentEl = document.createElement('div');
     contentEl.className = 'content';
@@ -386,6 +456,68 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
     }
   }
 
+  function updateThinkingContent(messageId) {
+    var thinking = thinkingBuffers[messageId] || '';
+    var el = messagesEl.querySelector('[data-message-id="' + messageId + '"]');
+    if (!el) return;
+
+    var indicator = el.querySelector('[data-indicator-id="' + messageId + '"]');
+    var block = el.querySelector('[data-thinking-id="' + messageId + '"]');
+
+    if (block) {
+      block.querySelector('.thinking-content').innerHTML = renderMarkdown(thinking);
+    } else if (thinking) {
+      if (indicator) indicator.remove();
+
+      block = document.createElement('details');
+      block.className = 'thinking-block';
+      block.dataset.thinkingId = messageId;
+      block.open = true;
+      var summary = document.createElement('summary');
+      summary.textContent = 'Thinking';
+      block.appendChild(summary);
+      var thinkingDiv = document.createElement('div');
+      thinkingDiv.className = 'thinking-content';
+      thinkingDiv.innerHTML = renderMarkdown(thinking);
+      block.appendChild(thinkingDiv);
+      var label = el.querySelector('.label');
+      if (label) {
+        label.after(block);
+      } else {
+        el.insertBefore(block, el.firstChild);
+      }
+    }
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  // ── Context files ──
+
+  function renderContextFiles(files) {
+    if (!ctxChips) return;
+    ctxChips.innerHTML = '';
+    if (!files || files.length === 0) return;
+    files.forEach(function(f) {
+      var chip = document.createElement('span');
+      chip.className = 'ctx-chip';
+
+      var pathSpan = document.createElement('span');
+      pathSpan.className = 'ctx-path';
+      pathSpan.textContent = f.path;
+      chip.appendChild(pathSpan);
+
+      var rmBtn = document.createElement('button');
+      rmBtn.className = 'ctx-remove';
+      rmBtn.textContent = '\u2715';
+      rmBtn.title = 'Remove ' + f.path;
+      rmBtn.addEventListener('click', function() {
+        vscode.postMessage({ type: 'removeContextFile', path: f.path });
+      });
+      chip.appendChild(rmBtn);
+
+      ctxChips.appendChild(chip);
+    });
+  }
+
   // ── Message handler ──
 
   window.addEventListener('message', function(event) {
@@ -398,7 +530,12 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
           models = d.models || [];
           models.forEach(function(m, i) {
             var opt = document.createElement('option');
+            var params = [];
+            if (m.model) params.push('model: ' + m.model);
+            if (m.maxTokens) params.push('maxTokens: ' + m.maxTokens);
+            if (m.temperature !== undefined) params.push('temp: ' + m.temperature);
             opt.textContent = m.name + ' (' + m.apiBase + ')';
+            opt.title = m.name + '\nURL: ' + m.apiBase + '\n' + params.join('\n');
             modelSelect.appendChild(opt);
             if (i === d.selectedIndex) modelSelect.selectedIndex = i + 1;
           });
@@ -434,9 +571,9 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
         case 'addMessage':
           if (d.messageId) {
             messageBuffers[d.messageId] = d.content || '';
-            createMessageEl(d.role, d.content, d.messageId);
+            createMessageEl(d.role, d.content, d.messageId, d.thinkingContent);
           } else {
-            createMessageEl(d.role, d.content);
+            createMessageEl(d.role, d.content, null, d.thinkingContent);
           }
           break;
 
@@ -447,9 +584,17 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
           }
           break;
 
+        case 'appendThinking':
+          if (d.messageId && thinkingBuffers[d.messageId] !== undefined) {
+            thinkingBuffers[d.messageId] += d.content;
+            updateThinkingContent(d.messageId);
+          }
+          break;
+
         case 'clearMessages':
           messagesEl.innerHTML = '';
           messageBuffers = {};
+          thinkingBuffers = {};
           break;
 
         case 'generating':
@@ -457,7 +602,15 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Ubuntu,sans-serif
           sendBtn.textContent = isGenerating ? 'Stop' : 'Send';
           sendBtn.disabled = false;
           input.disabled = isGenerating;
-          if (!isGenerating) input.focus();
+          if (!isGenerating) {
+            var indicators = document.querySelectorAll('[data-indicator-id]');
+            indicators.forEach(function(el) { el.remove(); });
+            input.focus();
+          }
+          break;
+
+        case 'contextFiles':
+          renderContextFiles(d.files);
           break;
 
         case 'connectionStatus':

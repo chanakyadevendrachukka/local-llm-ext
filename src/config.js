@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const CONFIG_FILENAME = '.vscode/local-llm-models.yaml';
+const CONFIG_FILENAME = 'config.yaml';
 
 function parseYaml(text) {
   const rawLines = text.split('\n').map(l => l.replace(/\t/g, '  '));
@@ -113,6 +113,7 @@ function getConfigPaths(workspaceRoot) {
   const paths = [];
   if (workspaceRoot) {
     paths.push(path.join(workspaceRoot, CONFIG_FILENAME));
+    paths.push(path.join(workspaceRoot, '.vscode', 'local-llm-models.yaml'));
   }
   paths.push(path.join(
     process.env.HOME || process.env.USERPROFILE || '/tmp',
@@ -138,7 +139,7 @@ function loadConfig(workspaceRoot) {
 }
 
 function getConfigYamlTemplate() {
-  return '# Local LLM Chat - Model Configuration\nmodels:\n  - name: "Llama 3 (Ollama)"\n    provider: "ollama"\n    apiBase: "http://localhost:11434"\n    model: "llama3"\n    maxTokens: 2048\n    temperature: 0.7\n  - name: "Mistral (OpenAI-compatible)"\n    provider: "openai"\n    apiBase: "http://localhost:1234/v1"\n    model: "mistral"\n    apiKey: ""\n';
+  return '# Local LLM Chat - Model Configuration\n# Place this file at the repo root as config.yaml\nmodels:\n  - name: "DeepSeek R1"\n    provider: "openai"\n    apiBase: "http://localhost:8000/v1"\n    model: "deepseek-r1"\n    maxTokens: 4096\n    temperature: 0.7\n    apiKey: ""\n  - name: "Qwen 2.5"\n    provider: "openai"\n    apiBase: "http://localhost:8000/v1"\n    model: "qwen2.5"\n    maxTokens: 2048\n    temperature: 0.7\n    apiKey: ""\n';
 }
 
 module.exports = { loadConfig, getConfigYamlTemplate, getConfigPaths };

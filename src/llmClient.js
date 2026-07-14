@@ -3,9 +3,13 @@ const http = require('http');
 
 function createChatCompletion(modelConfig, messages, onChunk, signal) {
   return new Promise((resolve, reject) => {
+    const msgs = messages.map(m => {
+      const msg = { role: m.role, content: m.content };
+      return msg;
+    });
     const body = JSON.stringify({
       model: modelConfig.model,
-      messages: messages.map(m => ({ role: m.role, content: m.content })),
+      messages: msgs,
       stream: true,
       max_tokens: modelConfig.maxTokens || 2048,
       temperature: modelConfig.temperature ?? 0.7,
@@ -31,6 +35,17 @@ function createChatCompletion(modelConfig, messages, onChunk, signal) {
     }
 
     const req = transport.request(options, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        let errBody = '';
+        res.on('data', (chunk) => { errBody += chunk.toString(); });
+        res.on('end', () => {
+          let msg = 'HTTP ' + res.statusCode;
+          try { const e = JSON.parse(errBody); if (e.error && e.error.message) msg += ': ' + e.error.message; } catch (_) {}
+          reject(new Error(msg));
+        });
+        return;
+      }
+
       let buffer = '';
 
       res.on('data', (chunk) => {
@@ -49,8 +64,13 @@ function createChatCompletion(modelConfig, messages, onChunk, signal) {
           if (jsonStr === '[DONE]') continue;
           try {
             const data = JSON.parse(jsonStr);
-            const content = data.choices?.[0]?.delta?.content || data.choices?.[0]?.text || '';
-            if (content && onChunk) onChunk(content);
+            const delta = data.choices?.[0]?.delta;
+            const content = delta?.content || data.choices?.[0]?.text || '';
+            const reasoning = delta?.reasoning_content || delta?.thinking || delta?.thinking_content || '';
+            if (onChunk) {
+              if (reasoning) onChunk({ type: 'thinking', content: reasoning });
+              if (content) onChunk({ type: 'content', content: content });
+            }
           } catch (_) {}
         }
       });

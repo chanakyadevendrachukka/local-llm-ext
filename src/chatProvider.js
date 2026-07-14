@@ -5,6 +5,7 @@ const { loadConfig, getConfigYamlTemplate } = require('./config');
 const { createChatCompletion, testConnection } = require('./llmClient');
 
 const STORAGE_KEY = 'local-llm-chat.conversations';
+const MAX_FILE_SIZE = 64000;
 
 class ChatViewProvider {
   static viewType = 'local-llm-chat.chatView';
@@ -25,6 +26,9 @@ class ChatViewProvider {
     const stored = this.context.globalState.get(STORAGE_KEY);
     if (Array.isArray(stored)) {
       this.conversations = stored;
+      for (const c of this.conversations) {
+        if (!c.contextFilePaths) c.contextFilePaths = [];
+      }
       this.currentId = stored.length > 0 ? stored[stored.length - 1].id : null;
     }
     if (!this.currentId) {
@@ -54,11 +58,13 @@ class ChatViewProvider {
       title: 'New Chat',
       messages: [],
       createdAt: Date.now(),
+      contextFilePaths: [],
     };
     this.conversations.push(conv);
     this.currentId = conv.id;
     this.saveConversations();
     this.sendConversations();
+    this.sendContextFiles();
   }
 
   deleteConversation(id) {
@@ -77,6 +83,7 @@ class ChatViewProvider {
     this.currentId = id;
     this.sendConversations();
     this.clearAndLoadMessages();
+    this.sendContextFiles();
   }
 
   updateCurrentTitle(title) {
@@ -86,6 +93,50 @@ class ChatViewProvider {
       this.saveConversations();
       this.sendConversations();
     }
+  }
+
+  getWorkspaceRoot() {
+    return vscode.workspace.workspaceFolders
+      ? vscode.workspace.workspaceFolders[0].uri.fsPath
+      : undefined;
+  }
+
+  getContextFiles() {
+    const conv = this.getCurrentConversation();
+    if (!conv || !conv.contextFilePaths || conv.contextFilePaths.length === 0) return [];
+
+    const root = this.getWorkspaceRoot();
+    if (!root) return [];
+
+    return conv.contextFilePaths.map(p => {
+      const absPath = path.isAbsolute(p) ? p : path.join(root, p);
+      try {
+        const uri = vscode.Uri.file(absPath);
+        const doc = vscode.workspace.textDocuments.find(d => d.uri.toString() === uri.toString());
+        let content = doc ? doc.getText() : fs.readFileSync(absPath, 'utf-8');
+        if (content.length > MAX_FILE_SIZE) {
+          content = content.slice(0, MAX_FILE_SIZE) + '\n\n... [file truncated at ' + MAX_FILE_SIZE + ' characters]';
+        }
+        return { path: p, content: content };
+      } catch (_) {
+        return null;
+      }
+    }).filter(Boolean);
+  }
+
+  getContextFilePaths() {
+    const conv = this.getCurrentConversation();
+    if (!conv) return [];
+    conv.contextFilePaths = conv.contextFilePaths || [];
+    return conv.contextFilePaths;
+  }
+
+  sendContextFiles() {
+    const files = this.getContextFiles();
+    this.postMessage({
+      type: 'contextFiles',
+      files: files.map(f => ({ path: f.path })),
+    });
   }
 
   loadModels() {
@@ -98,14 +149,21 @@ class ChatViewProvider {
 
     this.postMessage({
       type: 'setModels',
-      models: this.models.map(m => ({ name: m.name, apiBase: m.apiBase, model: m.model })),
+      models: this.models.map(m => ({
+        name: m.name,
+        apiBase: m.apiBase,
+        model: m.model,
+        provider: m.provider,
+        maxTokens: m.maxTokens,
+        temperature: m.temperature,
+      })),
       selectedIndex: this.selectedModelIndex,
     });
 
     if (this.models.length === 0) {
       const paths = [];
       if (workspaceRoot) {
-        paths.push(path.join(workspaceRoot, '.vscode', 'local-llm-models.yaml'));
+        paths.push(path.join(workspaceRoot, 'config.yaml'));
       }
       paths.push(path.join(
         process.env.HOME || process.env.USERPROFILE || '',
@@ -139,6 +197,7 @@ class ChatViewProvider {
 
     this.loadModels();
     this.sendConversations();
+    this.sendContextFiles();
 
     webviewView.webview.onDidReceiveMessage(data => {
       try {
@@ -154,6 +213,7 @@ class ChatViewProvider {
       case 'ready':
         this.loadModels();
         this.sendConversations();
+        this.sendContextFiles();
         break;
       case 'sendMessage':
         this.handleSendMessage(data.text);
@@ -188,6 +248,15 @@ class ChatViewProvider {
       case 'testConnection':
         this.handleTestConnection(data.index);
         break;
+      case 'addContextFile':
+        this.handleAddContextFile(data.path);
+        break;
+      case 'removeContextFile':
+        this.handleRemoveContextFile(data.path);
+        break;
+      case 'pickContextFile':
+        this.handlePickContextFile();
+        break;
       case 'webviewError':
         this.output.appendLine('WebView error: ' + data.message);
         if (data.stack) this.output.appendLine(data.stack);
@@ -220,17 +289,41 @@ class ChatViewProvider {
     const messageId = 'msg-' + Date.now() + '-' + Math.random().toString(36).slice(2, 6);
     this.postMessage({ type: 'addMessage', role: 'assistant', content: '', messageId: messageId });
 
+    const contextFiles = this.getContextFiles();
+    let messagesForApi;
+    if (current) {
+      messagesForApi = current.messages.slice();
+    } else {
+      messagesForApi = [{ role: 'user', content: text }];
+    }
+    if (contextFiles.length > 0) {
+      const ctxBlocks = contextFiles.map(f =>
+        '## ' + f.path + '\n```\n' + f.content + '\n```'
+      ).join('\n\n');
+      const ctxMsg = {
+        role: 'system',
+        content: 'The user has provided the following files for context:\n\n' + ctxBlocks,
+      };
+      messagesForApi.unshift(ctxMsg);
+    }
+
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
 
     try {
       let fullContent = '';
+      let fullThinking = '';
       await createChatCompletion(
         model,
-        current ? current.messages : [{ role: 'user', content: text }],
+        messagesForApi,
         (chunk) => {
-          fullContent += chunk;
-          this.postMessage({ type: 'appendToMessage', messageId: messageId, content: chunk });
+          if (chunk.type === 'thinking') {
+            fullThinking += chunk.content;
+            this.postMessage({ type: 'appendThinking', messageId: messageId, content: chunk.content });
+          } else if (chunk.type === 'content') {
+            fullContent += chunk.content;
+            this.postMessage({ type: 'appendToMessage', messageId: messageId, content: chunk.content });
+          }
         },
         signal
       );
@@ -238,7 +331,9 @@ class ChatViewProvider {
       if (signal.aborted) return;
 
       if (current) {
-        current.messages.push({ role: 'assistant', content: fullContent });
+        const assistantMsg = { role: 'assistant', content: fullContent };
+        if (fullThinking) assistantMsg.thinkingContent = fullThinking;
+        current.messages.push(assistantMsg);
       }
       this.saveConversations();
     } catch (err) {
@@ -268,6 +363,65 @@ class ChatViewProvider {
     }
   }
 
+  handleAddContextFile(filePath) {
+    const root = this.getWorkspaceRoot();
+    if (!root) return;
+
+    let targetPath = filePath;
+    if (filePath === '__active_editor__') {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) return;
+      targetPath = path.relative(root, editor.document.uri.fsPath);
+    }
+
+    const absPath = path.isAbsolute(targetPath) ? targetPath : path.join(root, targetPath);
+    const relPath = path.relative(root, absPath);
+
+    const conv = this.getCurrentConversation();
+    if (!conv) return;
+    conv.contextFilePaths = conv.contextFilePaths || [];
+    if (conv.contextFilePaths.includes(relPath)) return;
+
+    try {
+      fs.accessSync(absPath);
+    } catch (_) {
+      this.output.appendLine('File not found: ' + relPath);
+      return;
+    }
+
+    conv.contextFilePaths.push(relPath);
+    this.saveConversations();
+    this.sendContextFiles();
+    this.output.appendLine('Added context file: ' + relPath);
+  }
+
+  handleRemoveContextFile(filePath) {
+    const conv = this.getCurrentConversation();
+    if (!conv) return;
+    conv.contextFilePaths = (conv.contextFilePaths || []).filter(p => p !== filePath);
+    this.saveConversations();
+    this.sendContextFiles();
+    this.output.appendLine('Removed context file: ' + filePath);
+  }
+
+  async handlePickContextFile() {
+    const root = this.getWorkspaceRoot();
+    if (!root) return;
+
+    const uris = await vscode.window.showOpenDialog({
+      canSelectMany: true,
+      canSelectFiles: true,
+      canSelectFolders: false,
+      defaultUri: vscode.Uri.file(root),
+    });
+    if (!uris) return;
+
+    for (const uri of uris) {
+      const relPath = path.relative(root, uri.fsPath);
+      this.handleAddContextFile(relPath);
+    }
+  }
+
   async openConfigFile() {
     const workspaceRoot = vscode.workspace.workspaceFolders
       ? vscode.workspace.workspaceFolders[0].uri.fsPath
@@ -276,8 +430,8 @@ class ChatViewProvider {
     let configDir, configFile;
 
     if (workspaceRoot) {
-      configDir = vscode.Uri.file(path.join(workspaceRoot, '.vscode'));
-      configFile = vscode.Uri.file(path.join(workspaceRoot, '.vscode', 'local-llm-models.yaml'));
+      configDir = vscode.Uri.file(workspaceRoot);
+      configFile = vscode.Uri.file(path.join(workspaceRoot, 'config.yaml'));
     } else {
       const home = process.env.HOME || process.env.USERPROFILE || '';
       configDir = vscode.Uri.file(home);
@@ -321,7 +475,7 @@ class ChatViewProvider {
     const conv = this.getCurrentConversation();
     if (conv && conv.messages.length > 0) {
       for (const msg of conv.messages) {
-        this.postMessage({ type: 'addMessage', role: msg.role, content: msg.content });
+        this.postMessage({ type: 'addMessage', role: msg.role, content: msg.content, thinkingContent: msg.thinkingContent });
       }
     }
   }

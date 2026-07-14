@@ -1,0 +1,10 @@
+# Local LLM Chat - Model Configuration
+# Models defined here will appear in the chat extension panel.
+models:
+  - name: "DevDaemon"
+    provider: "devdaemon"
+    apiBase: "http://localhost:8080/v1"
+    model: "devdaemon"
+    maxTokens: 4096
+    temperature: 0.7
+    apiKey: "not-needed"
